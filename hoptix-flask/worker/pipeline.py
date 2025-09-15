@@ -136,7 +136,8 @@ def upsert_grades(db: Supa, tx_ids: List[str], grades: List[Dict]):
     
     if grads:
         try:
-            db.client.table("grades").upsert(grads, on_conflict="transaction_id").execute()
+            #db.client.table("grades").upsert(grads, on_conflict="transaction_id").execute()
+            db.client.table("dev_grades").upsert(grads, on_conflict="transaction_id").execute()
             logger.debug(f"Successfully upserted {len(grads)} grades")
         except Exception as e:
             logger.error(f"Error upserting grades: {str(e)}")
