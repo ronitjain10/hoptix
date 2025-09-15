@@ -1,0 +1,29 @@
+"on":
+    push:
+        branches:
+            - UpdatedReporting
+name: Deploy to hoptix-backend-dev
+jobs:
+    porter-deploy:
+        runs-on: ubuntu-latest
+        steps:
+            - name: Checkout code
+              uses: actions/checkout@v4
+            - name: Set Github tag
+              id: vars
+              run: echo "sha_short=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+            - name: Setup porter
+              uses: porter-dev/setup-porter@v0.1.0
+            - name: Deploy stack
+              timeout-minutes: 30
+              run: exec porter apply
+              env:
+                PORTER_APP_NAME: hoptix-backend-dev
+                PORTER_CLUSTER: "5106"
+                PORTER_DEPLOYMENT_TARGET_ID: 5bdbeac0-f058-4980-8e0d-6e149853fe96
+                PORTER_HOST: https://dashboard.porter.run
+                PORTER_PR_NUMBER: ${{ github.event.number }}
+                PORTER_PROJECT: "17195"
+                PORTER_REPO_NAME: ${{ github.event.repository.name }}
+                PORTER_TAG: ${{ steps.vars.outputs.sha_short }}
+                PORTER_TOKEN: ${{ secrets.PORTER_APP_17195_5106 }}
