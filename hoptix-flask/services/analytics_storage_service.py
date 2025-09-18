@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
-Analytics Storage Service for Hoptix
+Simplified Analytics Storage Service for Hoptix
 
-This service handles storing and retrieving analytics results from the database.
+This service handles storing and retrieving analytics results using a single
+run_analytics table indexed by run_id, video_id, and operator_name.
+All aggregations are done via SQL views and queries.
 """
 
 import json
@@ -14,14 +16,14 @@ from integrations.db_supabase import Supa
 logger = logging.getLogger(__name__)
 
 class AnalyticsStorageService:
-    """Service for storing and retrieving analytics results"""
+    """Simplified service for storing and retrieving analytics results"""
     
     def __init__(self, db: Supa):
         self.db = db
     
     def store_run_analytics(self, run_id: str, analytics_report: Dict[str, Any]) -> bool:
         """
-        Store analytics results for a run
+        Store analytics results for a run by breaking them down into video-operator records
         
         Args:
             run_id: The run ID to store analytics for
@@ -31,130 +33,163 @@ class AnalyticsStorageService:
             bool: True if successful, False otherwise
         """
         try:
-            # Extract key metrics from the report
-            summary = analytics_report.get('summary', {})
-            upselling = analytics_report.get('upselling', {})
-            upsizing = analytics_report.get('upsizing', {})
-            addons = analytics_report.get('addons', {})
-            
-            # Calculate totals
-            total_opportunities = (
-                upselling.get('total_opportunities', 0) +
-                upsizing.get('total_opportunities', 0) +
-                addons.get('total_opportunities', 0)
-            )
-            total_offers = (
-                upselling.get('total_offers', 0) +
-                upsizing.get('total_offers', 0) +
-                addons.get('total_offers', 0)
-            )
-            total_successes = (
-                upselling.get('total_successes', 0) +
-                upsizing.get('total_successes', 0) +
-                addons.get('total_successes', 0)
-            )
-            total_revenue = (
-                upselling.get('total_revenue', 0) +
-                upsizing.get('total_revenue', 0) +
-                addons.get('total_revenue', 0)
-            )
-            overall_conversion_rate = (total_successes / total_opportunities * 100) if total_opportunities > 0 else 0
-            
-            # Prepare data for insertion
-            analytics_data = {
-                'run_id': run_id,
-                
-                # Summary metrics
-                'total_transactions': summary.get('total_transactions', 0),
-                'complete_transactions': summary.get('complete_transactions', 0),
-                'completion_rate': round(summary.get('completion_rate', 0), 2),
-                'avg_items_initial': round(summary.get('avg_items_initial', 0), 2),
-                'avg_items_final': round(summary.get('avg_items_final', 0), 2),
-                'avg_item_increase': round(summary.get('avg_item_increase', 0), 2),
-                
-                # Upselling metrics
-                'upsell_opportunities': upselling.get('total_opportunities', 0),
-                'upsell_offers': upselling.get('total_offers', 0),
-                'upsell_successes': upselling.get('total_successes', 0),
-                'upsell_conversion_rate': round(upselling.get('conversion_rate', 0), 2),
-                'upsell_revenue': round(upselling.get('total_revenue', 0), 2),
-                
-                # Upsizing metrics
-                'upsize_opportunities': upsizing.get('total_opportunities', 0),
-                'upsize_offers': upsizing.get('total_offers', 0),
-                'upsize_successes': upsizing.get('total_successes', 0),
-                'upsize_conversion_rate': round(upsizing.get('conversion_rate', 0), 2),
-                'upsize_revenue': round(upsizing.get('total_revenue', 0), 2),
-                
-                # Add-on metrics
-                'addon_opportunities': addons.get('total_opportunities', 0),
-                'addon_offers': addons.get('total_offers', 0),
-                'addon_successes': addons.get('total_successes', 0),
-                'addon_conversion_rate': round(addons.get('conversion_rate', 0), 2),
-                'addon_revenue': round(addons.get('total_revenue', 0), 2),
-                
-                # Overall performance
-                'total_opportunities': total_opportunities,
-                'total_offers': total_offers,
-                'total_successes': total_successes,
-                'overall_conversion_rate': round(overall_conversion_rate, 2),
-                'total_revenue': round(total_revenue, 2),
-                
-                # Store complete report as JSON for detailed analysis
-                'detailed_analytics': analytics_report
-            }
-            
-            # Use upsert to handle potential duplicates
-            result = self.db.client.table('run_analytics').upsert(
-                analytics_data,
-                on_conflict='run_id'
-            ).execute()
-            
-            if result.data:
-                logger.info(f"Successfully stored analytics for run {run_id}")
+            operator_analytics = analytics_report.get('operator_analytics', {})
+            if not operator_analytics:
+                logger.warning(f"No operator analytics found for run {run_id}")
                 return True
-            else:
-                logger.error(f"Failed to store analytics for run {run_id}: No data returned")
-                return False
+            
+            # Collect all operators from different categories
+            all_operators = set()
+            upsell_by_operator = operator_analytics.get('upselling', {})
+            upsize_by_operator = operator_analytics.get('upsizing', {})
+            addon_by_operator = operator_analytics.get('addons', {})
+            
+            all_operators.update(upsell_by_operator.keys())
+            all_operators.update(upsize_by_operator.keys())
+            all_operators.update(addon_by_operator.keys())
+            
+            if not all_operators:
+                logger.info(f"No operator data found for run {run_id}")
+                return True
+            
+            # Get video IDs for this run
+            videos_result = self.db.client.table('videos').select('id').eq('run_id', run_id).execute()
+            video_ids = [v['id'] for v in videos_result.data] if videos_result.data else []
+            
+            if not video_ids:
+                logger.warning(f"No videos found for run {run_id}")
+                return True
+            
+            # Create analytics records for each operator
+            analytics_records = []
+            
+            for operator_name in all_operators:
+                upsell_data = upsell_by_operator.get(operator_name, {})
+                upsize_data = upsize_by_operator.get(operator_name, {})
+                addon_data = addon_by_operator.get(operator_name, {})
                 
+                # Calculate totals for this operator
+                total_opportunities = (
+                    upsell_data.get('total_opportunities', 0) +
+                    upsize_data.get('total_opportunities', 0) +
+                    addon_data.get('total_opportunities', 0)
+                )
+                total_offers = (
+                    upsell_data.get('total_offers', 0) +
+                    upsize_data.get('total_offers', 0) +
+                    addon_data.get('total_offers', 0)
+                )
+                total_successes = (
+                    upsell_data.get('total_successes', 0) +
+                    upsize_data.get('total_successes', 0) +
+                    addon_data.get('total_successes', 0)
+                )
+                total_revenue = (
+                    upsell_data.get('total_revenue', 0) +
+                    upsize_data.get('total_revenue', 0) +
+                    addon_data.get('total_revenue', 0)
+                )
+                
+                # For simplicity, create one aggregated record per operator for the run
+                # Use the first video_id as a placeholder (in real implementation, you'd have multiple records)
+                analytics_record = {
+                    'run_id': run_id,
+                    'video_id': video_ids[0],  # Placeholder - in reality you'd have one record per video
+                    'operator_name': operator_name,
+                    
+                    # Transaction counts (would come from actual transaction data)
+                    'total_transactions': 0,  # TODO: Calculate from actual data
+                    'complete_transactions': 0,  # TODO: Calculate from actual data
+                    
+                    # Overall performance
+                    'total_opportunities': total_opportunities,
+                    'total_offers': total_offers,
+                    'total_successes': total_successes,
+                    'total_revenue': round(total_revenue, 2),
+                    
+                    # Upselling metrics
+                    'upsell_opportunities': upsell_data.get('total_opportunities', 0),
+                    'upsell_offers': upsell_data.get('total_offers', 0),
+                    'upsell_successes': upsell_data.get('total_successes', 0),
+                    'upsell_revenue': round(upsell_data.get('total_revenue', 0), 2),
+                    
+                    # Upsizing metrics
+                    'upsize_opportunities': upsize_data.get('total_opportunities', 0),
+                    'upsize_offers': upsize_data.get('total_offers', 0),
+                    'upsize_successes': upsize_data.get('total_successes', 0),
+                    'upsize_revenue': round(upsize_data.get('total_revenue', 0), 2),
+                    'largest_offers': upsize_data.get('largest_offers', 0),
+                    
+                    # Add-on metrics
+                    'addon_opportunities': addon_data.get('total_opportunities', 0),
+                    'addon_offers': addon_data.get('total_offers', 0),
+                    'addon_successes': addon_data.get('total_successes', 0),
+                    'addon_revenue': round(addon_data.get('total_revenue', 0), 2),
+                    
+                    # Item counts (approximations)
+                    'items_initial': 0,  # TODO: Calculate from actual data
+                    'items_final': 0,   # TODO: Calculate from actual data
+                    'successful_items': total_successes,  # Approximation
+                }
+                
+                analytics_records.append(analytics_record)
+            
+            # Upsert all analytics records
+            if analytics_records:
+                result = self.db.client.table('run_analytics').upsert(
+                    analytics_records,
+                    on_conflict='run_id,video_id,operator_name'
+                ).execute()
+                
+                if result.data:
+                    logger.info(f"Successfully stored {len(analytics_records)} analytics records for run {run_id}")
+                    return True
+                else:
+                    logger.error(f"Failed to store analytics records for run {run_id}: No data returned")
+                    return False
+            
+            return True
+            
         except Exception as e:
             logger.error(f"Error storing analytics for run {run_id}: {e}")
             return False
     
     def get_run_analytics(self, run_id: str) -> Optional[Dict[str, Any]]:
-        """
-        Get analytics results for a specific run
-        
-        Args:
-            run_id: The run ID to get analytics for
-            
-        Returns:
-            Dict containing analytics data or None if not found
-        """
+        """Get aggregated run totals (for backward compatibility)"""
+        return self.get_run_totals(run_id)
+    
+    def get_run_totals(self, run_id: str) -> Optional[Dict[str, Any]]:
+        """Get aggregated run totals"""
         try:
-            result = self.db.client.table('run_analytics_with_details').select('*').eq('run_id', run_id).execute()
+            result = self.db.client.table('run_analytics_with_details')\
+                .select('*')\
+                .eq('run_id', run_id)\
+                .limit(1)\
+                .execute()
             
-            if result.data:
-                return result.data[0]
-            else:
-                logger.warning(f"No analytics found for run {run_id}")
-                return None
-                
+            return result.data[0] if result.data else None
+            
         except Exception as e:
-            logger.error(f"Error retrieving analytics for run {run_id}: {e}")
+            logger.error(f"Error retrieving run totals for {run_id}: {e}")
             return None
     
-    def get_location_analytics(self, location_id: str, limit: int = 10) -> List[Dict[str, Any]]:
-        """
-        Get recent analytics results for a location
-        
-        Args:
-            location_id: The location ID to get analytics for
-            limit: Maximum number of results to return
+    def get_operator_performance_by_run(self, run_id: str) -> List[Dict[str, Any]]:
+        """Get operator performance for a specific run"""
+        try:
+            result = self.db.client.table('operator_performance_by_run')\
+                .select('*')\
+                .eq('run_id', run_id)\
+                .order('overall_conversion_rate', desc=True)\
+                .execute()
             
-        Returns:
-            List of analytics results ordered by run_date desc
-        """
+            return result.data if result.data else []
+            
+        except Exception as e:
+            logger.error(f"Error retrieving operator performance for run {run_id}: {e}")
+            return []
+    
+    def get_location_analytics(self, location_id: str, limit: int = 10) -> List[Dict[str, Any]]:
+        """Get recent run totals for a location"""
         try:
             result = self.db.client.table('run_analytics_with_details')\
                 .select('*')\
@@ -169,83 +204,24 @@ class AnalyticsStorageService:
             logger.error(f"Error retrieving location analytics for {location_id}: {e}")
             return []
     
-    def get_org_analytics_summary(self, org_id: str, days: int = 30) -> Dict[str, Any]:
-        """
-        Get aggregated analytics summary for an organization
-        
-        Args:
-            org_id: The organization ID
-            days: Number of days to look back
-            
-        Returns:
-            Dict containing aggregated metrics
-        """
+    def get_operator_performance_by_location(self, location_id: str, days: int = 30) -> List[Dict[str, Any]]:
+        """Get operator performance for a location over time"""
         try:
-            # Get analytics for the last N days
-            result = self.db.client.table('run_analytics_with_details')\
+            result = self.db.client.table('operator_performance_by_run')\
                 .select('*')\
-                .eq('org_id', org_id)\
+                .eq('location_id', location_id)\
                 .gte('run_date', f'now() - interval \'{days} days\'')\
+                .order('run_date', desc=True)\
                 .execute()
             
-            if not result.data:
-                return {
-                    'total_runs': 0,
-                    'total_transactions': 0,
-                    'avg_completion_rate': 0,
-                    'avg_conversion_rate': 0,
-                    'total_revenue': 0,
-                    'period_days': days
-                }
-            
-            # Aggregate the data
-            analytics_list = result.data
-            total_runs = len(analytics_list)
-            
-            # Sum up all metrics
-            total_transactions = sum(a.get('total_transactions', 0) for a in analytics_list)
-            total_complete = sum(a.get('complete_transactions', 0) for a in analytics_list)
-            total_opportunities = sum(a.get('total_opportunities', 0) for a in analytics_list)
-            total_successes = sum(a.get('total_successes', 0) for a in analytics_list)
-            total_revenue = sum(a.get('total_revenue', 0) for a in analytics_list)
-            
-            # Calculate averages
-            avg_completion_rate = (total_complete / total_transactions * 100) if total_transactions > 0 else 0
-            avg_conversion_rate = (total_successes / total_opportunities * 100) if total_opportunities > 0 else 0
-            
-            return {
-                'total_runs': total_runs,
-                'total_transactions': total_transactions,
-                'avg_completion_rate': round(avg_completion_rate, 2),
-                'avg_conversion_rate': round(avg_conversion_rate, 2),
-                'total_revenue': round(total_revenue, 2),
-                'period_days': days,
-                'avg_revenue_per_run': round(total_revenue / total_runs, 2) if total_runs > 0 else 0
-            }
+            return result.data if result.data else []
             
         except Exception as e:
-            logger.error(f"Error retrieving org analytics summary for {org_id}: {e}")
-            return {
-                'total_runs': 0,
-                'total_transactions': 0,
-                'avg_completion_rate': 0,
-                'avg_conversion_rate': 0,
-                'total_revenue': 0,
-                'period_days': days,
-                'error': str(e)
-            }
+            logger.error(f"Error retrieving operator performance for location {location_id}: {e}")
+            return []
     
     def get_analytics_trends(self, location_id: str, days: int = 30) -> List[Dict[str, Any]]:
-        """
-        Get analytics trends over time for a location
-        
-        Args:
-            location_id: The location ID
-            days: Number of days to look back
-            
-        Returns:
-            List of daily analytics data for trending
-        """
+        """Get analytics trends over time for a location"""
         try:
             result = self.db.client.table('run_analytics_with_details')\
                 .select('run_date, completion_rate, overall_conversion_rate, total_revenue, total_transactions')\
@@ -259,6 +235,37 @@ class AnalyticsStorageService:
         except Exception as e:
             logger.error(f"Error retrieving analytics trends for {location_id}: {e}")
             return []
-
-
-
+    
+    def get_org_analytics_summary(self, org_id: str, days: int = 30) -> Dict[str, Any]:
+        """Get aggregated analytics summary for an organization"""
+        try:
+            # Get all runs for the org in the time period
+            result = self.db.client.table('run_analytics_with_details')\
+                .select('*')\
+                .eq('org_id', org_id)\
+                .gte('run_date', f'now() - interval \'{days} days\'')\
+                .execute()
+            
+            if not result.data:
+                return {}
+            
+            # Aggregate across all runs
+            totals = {
+                'total_runs': len(result.data),
+                'total_transactions': sum(r.get('total_transactions', 0) for r in result.data),
+                'total_opportunities': sum(r.get('total_opportunities', 0) for r in result.data),
+                'total_successes': sum(r.get('total_successes', 0) for r in result.data),
+                'total_revenue': sum(r.get('total_revenue', 0) for r in result.data),
+            }
+            
+            # Calculate averages
+            totals['avg_conversion_rate'] = (
+                totals['total_successes'] / totals['total_opportunities'] * 100 
+                if totals['total_opportunities'] > 0 else 0
+            )
+            
+            return totals
+            
+        except Exception as e:
+            logger.error(f"Error retrieving org summary for {org_id}: {e}")
+            return {}

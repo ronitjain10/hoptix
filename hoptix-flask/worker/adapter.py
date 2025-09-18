@@ -171,26 +171,60 @@ def _tmp_audio_from_video(video_path: str):
         with contextlib.suppress(Exception): os.rmdir(tmpdir)
 
 def _segment_active_spans(y: np.ndarray, sr: int, window_s: float = 15.0) -> List[tuple[float,float]]:
-    # Mirrors your simple “average==0 → silence” logic to carve spans.
+    """
+    Segment audio into active (non-silent) spans.
+    Fixed version that doesn't modify the array while iterating.
+    """
     interval = int(sr * window_s)
-    idx, removed, prev_active = 0, 0, 0
+    if interval <= 0:
+        return [(0.0, len(y) / sr)]
+    
     begins, ends = [], []
-    y_list = y.tolist()
-    while idx + interval < len(y_list) and idx >= 0:
-        chunk_avg = float(np.average(y_list[idx: idx + interval]))
-        if chunk_avg == 0.0:
-            if prev_active == 1:
-                ends.append((idx + removed)/sr)
-                prev_active = 0
-            del y_list[idx: idx+interval]
-            removed += interval
-        else:
-            if prev_active == 0:
-                begins.append((idx + removed)/sr)
-                prev_active = 1
-            idx += interval
+    prev_active = False
+    
+    # Process audio in chunks without modifying the original array
+    for idx in range(0, len(y), interval):
+        # Get chunk, ensuring we don't go beyond array bounds
+        end_idx = min(idx + interval, len(y))
+        if end_idx <= idx:
+            break
+            
+        chunk = y[idx:end_idx]
+        if len(chunk) == 0:
+            break
+            
+        # Calculate average amplitude
+        chunk_avg = float(np.average(np.abs(chunk)))  # Use absolute values for better silence detection
+        is_active = chunk_avg > 1e-6  # Small threshold to avoid floating point precision issues
+        
+        # Track transitions between active and silent regions
+        current_time = idx / sr
+        
+        if is_active and not prev_active:
+            # Start of active region
+            begins.append(current_time)
+            prev_active = True
+        elif not is_active and prev_active:
+            # End of active region
+            ends.append(current_time)
+            prev_active = False
+    
+    # Handle case where audio ends while still active
+    if prev_active:
+        ends.append(len(y) / sr)
+    
+    # Ensure we have valid spans
+    if len(begins) == 0:
+        # If no active regions found, return the entire audio
+        return [(0.0, len(y) / sr)]
+    
+    # Make sure begins and ends are balanced
     if len(begins) != len(ends):
-        ends.append((len(y_list)+removed)/sr)
+        if len(begins) > len(ends):
+            ends.append(len(y) / sr)
+        else:
+            begins = begins[:len(ends)]
+    
     return list(zip(begins, ends))
 
 def _parse_dt_file_timestamp(s3_key: str) -> str:
@@ -241,35 +275,89 @@ def _json_or_none(txt: str) -> Dict[str, Any] | None:
 # ---------- 1) TRANSCRIBE (extract spans, per‑span ASR) ----------
 def transcribe_video(local_path: str) -> List[Dict]:
     segs: List[Dict] = []
-    with _tmp_audio_from_video(local_path) as (audio_path, duration):
-        y, sr = librosa.load(audio_path, sr=None)
-        spans = _segment_active_spans(y, sr, 15.0) or [(0.0, duration)]
-        for i, (b, e) in enumerate(spans):
-            # safer subclip render
-            with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
-                tmp_audio = tf.name
-            # Ensure end time doesn't exceed video duration
-            end_time = min(int(e+1), duration)
-            clip = VideoFileClip(local_path).subclip(int(b), end_time)
-            clip.audio.write_audiofile(tmp_audio, verbose=False, logger=None)
-            clip.close()
-
-            with open(tmp_audio, "rb") as af:
+    
+    try:
+        with _tmp_audio_from_video(local_path) as (audio_path, duration):
+            if duration <= 0:
+                print(f"Warning: Video has zero or negative duration: {duration}")
+                return segs
+                
+            y, sr = librosa.load(audio_path, sr=None)
+            if len(y) == 0:
+                print(f"Warning: Audio array is empty for {local_path}")
+                return segs
+                
+            print(f"Audio loaded: {len(y)} samples at {sr}Hz, duration: {duration}s")
+            
+            spans = _segment_active_spans(y, sr, 15.0)
+            if not spans:
+                print("No active spans found, using full duration")
+                spans = [(0.0, duration)]
+                
+            print(f"Found {len(spans)} active spans")
+            
+            for i, (b, e) in enumerate(spans):
+                # Validate span bounds
+                if b < 0 or e < 0 or b >= e:
+                    print(f"Warning: Invalid span {i}: ({b}, {e}), skipping")
+                    continue
+                    
+                if b >= duration:
+                    print(f"Warning: Span {i} start time {b} >= duration {duration}, skipping")
+                    continue
+                
+                # safer subclip render
+                with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tf:
+                    tmp_audio = tf.name
+                    
                 try:
-                    txt = client.audio.transcriptions.create(
-                        model=_settings.ASR_MODEL,
-                        file=af,
-                        response_format="text",
-                        temperature=0.001,
-                        prompt="Label each line as Operator: or Customer: where possible."
-                    )
-                    text = str(txt)
-                except Exception as ex:
-                    print("ASR error:", ex)
-                    text = ""
-            with contextlib.suppress(Exception): os.remove(tmp_audio)
+                    # Ensure end time doesn't exceed video duration
+                    end_time = min(int(e+1), int(duration))
+                    start_time = max(0, int(b))
+                    
+                    if end_time <= start_time:
+                        print(f"Warning: Invalid time range for span {i}: {start_time}-{end_time}, skipping")
+                        continue
+                        
+                    print(f"Processing span {i+1}/{len(spans)}: {start_time}s-{end_time}s")
+                    
+                    clip = VideoFileClip(local_path).subclip(start_time, end_time)
+                    if clip.audio is None:
+                        print(f"Warning: No audio in span {i}, skipping")
+                        clip.close()
+                        continue
+                        
+                    clip.audio.write_audiofile(tmp_audio, verbose=False, logger=None)
+                    clip.close()
 
-            segs.append({"start": float(b), "end": float(e), "text": text})
+                    with open(tmp_audio, "rb") as af:
+                        try:
+                            txt = client.audio.transcriptions.create(
+                                model=_settings.ASR_MODEL,
+                                file=af,
+                                response_format="text",
+                                temperature=0.001,
+                                prompt="Label each line as Operator: or Customer: where possible."
+                            )
+                            text = str(txt)
+                        except Exception as ex:
+                            print(f"ASR error for span {i}: {ex}")
+                            text = ""
+                            
+                except Exception as ex:
+                    print(f"Error processing span {i}: {ex}")
+                    text = ""
+                finally:
+                    with contextlib.suppress(Exception): 
+                        os.remove(tmp_audio)
+
+                segs.append({"start": float(b), "end": float(e), "text": text})
+                
+    except Exception as e:
+        print(f"Error in transcribe_video: {e}")
+        import traceback
+        traceback.print_exc()
+        
     return segs
 
 # ---------- 2) SPLIT (Step‑1 prompt per segment, preserve your @#& format) ----------

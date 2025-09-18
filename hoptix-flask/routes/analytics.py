@@ -306,3 +306,58 @@ def get_location_leaderboard(location_id: str):
             'success': False,
             'error': 'Internal server error'
         }), 500
+
+@analytics_bp.route('/run/<run_id>/operators', methods=['GET'])
+def get_run_operator_performance(run_id: str):
+    """
+    Get operator performance data for a specific run
+    
+    Returns:
+        JSON: List of operator performance records for the run
+    """
+    try:
+        operator_data = storage_service.get_operator_performance_by_run(run_id)
+        
+        return jsonify({
+            'success': True,
+            'data': operator_data,
+            'count': len(operator_data)
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error retrieving run operator performance: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Internal server error'
+        }), 500
+
+@analytics_bp.route('/location/<location_id>/operators', methods=['GET'])
+def get_location_operator_performance(location_id: str):
+    """
+    Get operator performance data for a location
+    
+    Query Parameters:
+        days (int): Number of days to look back (default: 30)
+        
+    Returns:
+        JSON: List of operator performance records for the location
+    """
+    try:
+        days = request.args.get('days', 30, type=int)
+        days = min(days, 365)  # Cap at 1 year
+        
+        operator_data = storage_service.get_operator_performance_by_location(location_id, days)
+        
+        return jsonify({
+            'success': True,
+            'data': operator_data,
+            'count': len(operator_data),
+            'period_days': days
+        }), 200
+        
+    except Exception as e:
+        logger.error(f"Error retrieving location operator performance: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Internal server error'
+        }), 500
