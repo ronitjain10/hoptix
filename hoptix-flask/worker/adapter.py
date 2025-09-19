@@ -272,6 +272,37 @@ def _json_or_none(txt: str) -> Dict[str, Any] | None:
     except Exception:
         return None
 
+def identify_operator(transcript: str) -> str:
+    """
+    Placeholder function to identify operator from transcript.
+    TODO: Implement actual operator identification logic.
+    
+    Args:
+        transcript: The raw transcript text
+        
+    Returns:
+        str: Operator name or "No Operator" if not found
+    """
+    # Placeholder implementation - always return "No Operator" for now
+    # In the future, this could:
+    # 1. Use voice recognition/speaker diarization
+    # 2. Parse operator names from transcript patterns
+    # 3. Use ML models to identify speakers
+    # 4. Match against known operator voice profiles
+    # 5. Extract from shift schedules/timestamps
+    
+    # Simple pattern matching as a starting point
+    transcript_lower = transcript.lower()
+    
+    # Look for common operator name patterns in transcripts
+    # This is a very basic implementation
+    if "operator:" in transcript_lower:
+        # Could extract actual names here if they appear in transcripts
+        pass
+    
+    # For now, always return the default
+    return "No Operator"
+
 # ---------- 1) TRANSCRIBE (extract spans, per‑span ASR) ----------
 def transcribe_video(local_path: str) -> List[Dict]:
     segs: List[Dict] = []
@@ -495,7 +526,8 @@ def grade_transactions(transactions: List[Dict]) -> List[Dict]:
                 "score": 0.0,
                 "details": base,
                 "transcript": "",     # Empty transcript
-                "gpt_price": 0.0      # No cost for empty
+                "gpt_price": 0.0,     # No cost for empty
+                "operator": "No Operator"  # Default for empty transcript
             })
             continue
 
@@ -559,6 +591,9 @@ def grade_transactions(transactions: List[Dict]) -> List[Dict]:
             except Exception:
                 score = 0.0
 
+        # Identify operator from transcript
+        operator_name = identify_operator(transcript)
+        
         graded.append({
             "upsell_possible": bool(upsell_possible),
             "upsell_offered":  bool(upsell_offered),
@@ -567,6 +602,7 @@ def grade_transactions(transactions: List[Dict]) -> List[Dict]:
             "score":           float(score),
             "details":         details,
             "transcript":      transcript,  # Add raw transcript
-            "gpt_price":       gpt_price    # Add calculated price
+            "gpt_price":       gpt_price,   # Add calculated price
+            "operator":        operator_name  # Add identified operator
         })
     return graded

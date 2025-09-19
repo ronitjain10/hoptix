@@ -3,6 +3,7 @@ import uuid
 import logging
 from datetime import datetime
 from flask import Flask, jsonify, request
+from flask_cors import CORS
 from dotenv import load_dotenv
 
 # Load environment variables
@@ -12,20 +13,28 @@ load_dotenv()
 from config import Settings
 from integrations.db_supabase import Supa
 from scripts.grade_from_csv import grade_from_csv
-from services.analytics_service import HoptixAnalyticsService
+# Analytics service is now handled through routes/analytics.py
 from routes.analytics import analytics_bp
 
-# Configure logging for production - only to console
+# Configure logging for production - console and file
+import os
+log_handlers = [logging.StreamHandler()]
+
+# Add file logging if LOG_FILE environment variable is set
+if os.getenv('LOG_FILE'):
+    log_handlers.append(logging.FileHandler(os.getenv('LOG_FILE')))
+
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    handlers=[
-        logging.StreamHandler()
-    ]
+    format='%(asctime)s - %(levelname)s - %(name)s - %(message)s',
+    handlers=log_handlers
 )
 logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
+
+# Enable CORS for all routes
+CORS(app, origins=["http://localhost:3000", "http://127.0.0.1:3000"])
 
 # Register blueprints
 app.register_blueprint(analytics_bp)

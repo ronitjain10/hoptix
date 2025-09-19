@@ -135,6 +135,7 @@ def upsert_grades(db: Supa, tx_ids: List[str], grades: List[Dict]):
             
             # New fields for updated table
             "transcript": g.get("transcript", ""),  # Raw transcript
+            "operator": g.get("operator", "No Operator"),  # Identified operator
 
             # always keep a full blob too
             "details": d

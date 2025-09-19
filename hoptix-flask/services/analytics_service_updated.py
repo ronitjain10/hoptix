@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
 """
-Analytics Service for Hoptix Grading Data
+Updated Analytics Service for Hoptix Grading Data
 
-This service provides comprehensive analytics on upselling, upsizing, and add-on performance
-from transaction grading data. It analyzes both overall performance and item-specific metrics.
+This service calculates analytics on-demand from the graded_rows_filtered view,
+which includes all transaction, grading, and worker information in one place.
 """
 
 import json
@@ -12,6 +12,7 @@ from collections import defaultdict, Counter
 from datetime import datetime
 import logging
 from .item_lookup_service import get_item_lookup_service
+from integrations.db_supabase import Supa
 
 logger = logging.getLogger(__name__)
 
@@ -109,7 +110,8 @@ class UpsellAnalytics:
         })
         
         for transaction in transactions:
-            operator = transaction.get("Operator", "Unknown")
+            # Try both possible operator field names for compatibility
+            operator = transaction.get("Operator Name", transaction.get("Operator", "Unknown Operator"))
             
             # Parse items initially requested
             initial_items = UpsellAnalytics._parse_items_field(transaction.get("Items Initially Requested", "0"))
@@ -304,7 +306,8 @@ class UpsizeAnalytics:
         })
         
         for transaction in transactions:
-            operator = transaction.get("Operator", "Unknown")
+            # Try both possible operator field names for compatibility
+            operator = transaction.get("Operator Name", transaction.get("Operator", "Unknown Operator"))
             
             # Parse items initially requested
             initial_items = UpsizeAnalytics._parse_items_field(transaction.get("Items Initially Requested", "0"))
@@ -477,7 +480,8 @@ class AddonAnalytics:
         })
         
         for transaction in transactions:
-            operator = transaction.get("Operator", "Unknown")
+            # Try both possible operator field names for compatibility
+            operator = transaction.get("Operator Name", transaction.get("Operator", "Unknown Operator"))
             
             # Parse items that could have add-ons (this is what we should track by)
             addon_capable_items = AddonAnalytics._parse_items_field(transaction.get("Items in Order that could have Add-Ons", "0"))
@@ -551,16 +555,157 @@ class AddonAnalytics:
 
 
 class HoptixAnalyticsService:
-    """Main analytics service for Hoptix grading data"""
+    """Main analytics service for Hoptix grading data - now using graded_rows_filtered view"""
     
-    def __init__(self):
+    def __init__(self, db: Supa):
+        self.db = db
         self.upsell_analytics = UpsellAnalytics()
         self.upsize_analytics = UpsizeAnalytics()
         self.addon_analytics = AddonAnalytics()
         self.item_lookup = get_item_lookup_service()
     
+    def get_run_transactions(self, run_id: str) -> List[Dict[str, Any]]:
+        """Get all transactions for a run from the graded_rows_filtered view"""
+        try:
+            result = self.db.client.from_('graded_rows_filtered')\
+                .select('*')\
+                .eq('Run ID', run_id)\
+                .execute()
+            
+            return result.data if result.data else []
+            
+        except Exception as e:
+            logger.error(f"Error retrieving transactions for run {run_id}: {e}")
+            return []
+    
+    def get_location_transactions(self, location_id: str, days: int = 30) -> List[Dict[str, Any]]:
+        """Get transactions for a location from the graded_rows_filtered view"""
+        try:
+            # Note: You'll need to add location_id to the graded_rows_filtered view
+            # For now, we'll use a different approach via runs table
+            runs_result = self.db.client.table('runs')\
+                .select('id')\
+                .eq('location_id', location_id)\
+                .gte('run_date', f'now() - interval \'{days} days\'')\
+                .execute()
+            
+            if not runs_result.data:
+                return []
+            
+            run_ids = [run['id'] for run in runs_result.data]
+            
+            # Get transactions for these runs
+            result = self.db.client.from_('graded_rows_filtered')\
+                .select('*')\
+                .in_('Run ID', run_ids)\
+                .execute()
+            
+            return result.data if result.data else []
+            
+        except Exception as e:
+            logger.error(f"Error retrieving transactions for location {location_id}: {e}")
+            return []
+    
+    def generate_run_report(self, run_id: str) -> Dict[str, Any]:
+        """Generate a comprehensive analytics report for a specific run"""
+        transactions = self.get_run_transactions(run_id)
+        
+        if not transactions:
+            logger.warning(f"No transactions found for run {run_id}")
+            return {}
+        
+        return self.generate_comprehensive_report(transactions)
+    
+    def generate_location_report(self, location_id: str, days: int = 30) -> Dict[str, Any]:
+        """Generate a comprehensive analytics report for a location"""
+        transactions = self.get_location_transactions(location_id, days)
+        
+        if not transactions:
+            logger.warning(f"No transactions found for location {location_id}")
+            return {}
+        
+        return self.generate_comprehensive_report(transactions)
+    
+    def get_operator_performance_by_run(self, run_id: str) -> List[Dict[str, Any]]:
+        """Get operator performance data for a specific run"""
+        transactions = self.get_run_transactions(run_id)
+        
+        if not transactions:
+            return []
+        
+        # Group by operator
+        operator_transactions = defaultdict(list)
+        for transaction in transactions:
+            operator = transaction.get("Operator Name", "Unknown Operator")
+            operator_transactions[operator].append(transaction)
+        
+        # Calculate metrics for each operator
+        operator_performance = []
+        for operator, op_transactions in operator_transactions.items():
+            # Generate mini-report for this operator
+            operator_report = self.generate_comprehensive_report(op_transactions)
+            
+            # Extract key metrics
+            performance = {
+                "operator_name": operator,
+                "transaction_count": len(op_transactions),
+                "completion_rate": operator_report["summary"]["completion_rate"],
+                "avg_items_increase": operator_report["summary"]["avg_item_increase"],
+                
+                # Upselling metrics
+                "upsell_opportunities": operator_report["upselling"]["total_opportunities"],
+                "upsell_offers": operator_report["upselling"]["total_offers"],
+                "upsell_successes": operator_report["upselling"]["total_successes"],
+                "upsell_conversion_rate": operator_report["upselling"]["conversion_rate"],
+                "upsell_revenue": operator_report["upselling"]["total_revenue"],
+                
+                # Upsizing metrics
+                "upsize_opportunities": operator_report["upsizing"]["total_opportunities"],
+                "upsize_offers": operator_report["upsizing"]["total_offers"],
+                "upsize_successes": operator_report["upsizing"]["total_successes"],
+                "upsize_conversion_rate": operator_report["upsizing"]["conversion_rate"],
+                "upsize_revenue": operator_report["upsizing"]["total_revenue"],
+                
+                # Add-on metrics
+                "addon_opportunities": operator_report["addons"]["total_opportunities"],
+                "addon_offers": operator_report["addons"]["total_offers"],
+                "addon_successes": operator_report["addons"]["total_successes"],
+                "addon_conversion_rate": operator_report["addons"]["conversion_rate"],
+                "addon_revenue": operator_report["addons"]["total_revenue"],
+                
+                # Overall metrics
+                "total_opportunities": (
+                    operator_report["upselling"]["total_opportunities"] +
+                    operator_report["upsizing"]["total_opportunities"] +
+                    operator_report["addons"]["total_opportunities"]
+                ),
+                "total_successes": (
+                    operator_report["upselling"]["total_successes"] +
+                    operator_report["upsizing"]["total_successes"] +
+                    operator_report["addons"]["total_successes"]
+                ),
+                "total_revenue": (
+                    operator_report["upselling"]["total_revenue"] +
+                    operator_report["upsizing"]["total_revenue"] +
+                    operator_report["addons"]["total_revenue"]
+                )
+            }
+            
+            # Calculate overall conversion rate
+            performance["overall_conversion_rate"] = (
+                performance["total_successes"] / performance["total_opportunities"] * 100
+                if performance["total_opportunities"] > 0 else 0
+            )
+            
+            operator_performance.append(performance)
+        
+        # Sort by overall conversion rate
+        operator_performance.sort(key=lambda x: x["overall_conversion_rate"], reverse=True)
+        
+        return operator_performance
+    
     def generate_comprehensive_report(self, transactions: List[Dict]) -> Dict[str, Any]:
-        """Generate a comprehensive analytics report"""
+        """Generate a comprehensive analytics report from transactions"""
         logger.info(f"Generating analytics report for {len(transactions)} transactions")
         
         # Calculate individual metrics
